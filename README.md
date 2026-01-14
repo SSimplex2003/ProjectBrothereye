@@ -1,0 +1,1 @@
+Project Brother eye uses automationand AI to monitor live operators and what they are doing later it shall have a complete ui and complete actions for now it works by seeing if ur coding on break or shit like that 
