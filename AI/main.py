@@ -1,6 +1,5 @@
 import time
 from datetime import datetime, timezone
-
 import cv2
 import requests
 from ultralytics import YOLO
@@ -9,7 +8,7 @@ SEND_EVERY_SEC = 2.0
 
 ZONE_X, ZONE_Y, ZONE_W, ZONE_H = 100, 100, 400, 400
 
-model = YOLO("yolov8n-pose.pt")
+model = YOLO("../yolov8n-pose.pt")
 
 cap = cv2.VideoCapture(0)
 session = requests.Session()
