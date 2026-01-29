@@ -1,12 +1,17 @@
+import os
 import time
 from datetime import datetime, timezone
+from pathlib import Path
+from collections import deque
+
 import cv2
 import numpy as np
 import requests
-from collections import deque
 from ultralytics import YOLO
-from pathlib import Path
 
+# -----------------------------
+# Paths / Config
+# -----------------------------
 ROOT = Path(__file__).resolve().parents[1]
 
 N8N_URL = "http://localhost:5678/webhook/work-monitor"
@@ -26,12 +31,31 @@ SEG_MASK_THRESH = 0.50
 BLUR_K = 55
 MASK_FEATHER = 9
 
+# X3D
 ENABLE_X3D = True
 X3D_MODEL_PATH = str(ROOT / "AI" / "runs" / "x3d" / "best.pt")
 X3D_CLIP_LEN = 16
 X3D_LABEL_EVERY_N_FRAMES = 8
 
+# Cameras
+LAPTOP_CAM_INDEX = 0
+RTSP_URL = "rtsp://admin:Calin2003!@192.168.1.135:554/cam/realmonitor?channel=1&subtype=1"
 
+# Choose behavior:
+#   "both" = process both feeds (slower)
+#   "rtsp" = only RTSP feed
+#   "laptop" = only laptop feed
+MODE = "both"
+
+# Low-latency knobs for RTSP
+RTSP_FORCE_TCP = True           # True reduces packet loss jitter
+RTSP_BUFFER_SIZE = 1            # small buffer
+DROP_OLD_FRAMES = True          # aggressively keep most recent frame
+
+
+# -----------------------------
+# X3D Classifier
+# -----------------------------
 class X3DClassifier:
     def __init__(self, ckpt_path, device="cpu", clip_len=16, classnames=None):
         import torch
@@ -86,7 +110,7 @@ class X3DClassifier:
         crop = 160
         y0 = max(0, (new_h - crop) // 2)
         x0 = max(0, (new_w - crop) // 2)
-        cropped = resized[:, y0:y0+crop, x0:x0+crop, :]
+        cropped = resized[:, y0:y0 + crop, x0:x0 + crop, :]
 
         x = torch.from_numpy(cropped).permute(3, 0, 1, 2).unsqueeze(0)
         mean = torch.tensor([0.45, 0.45, 0.45], device=self.device).view(1, 3, 1, 1, 1)
@@ -106,7 +130,9 @@ class X3DClassifier:
             return label, conf
 
 
-
+# -----------------------------
+# Utility functions
+# -----------------------------
 def clamp(v, lo, hi): return max(lo, min(hi, v))
 
 def bbox_iou(a, b):
@@ -215,9 +241,9 @@ def classify_fallback(head_dir, hands, posture, speed_px_s, in_zone):
         return "moving"
     if not in_zone:
         return "break"
-    if posture in ("SittingOrCrouch","Leaning") and hands in ("HandsMid","HandsLow"):
+    if posture in ("SittingOrCrouch", "Leaning") and hands in ("HandsMid", "HandsLow"):
         return "work"
-    if head_dir in ("Left","Right"):
+    if head_dir in ("Left", "Right"):
         return "work"
     return "work"
 
@@ -226,6 +252,7 @@ SKELETON_EDGES = [
     (5, 11), (6, 12), (11, 12), (11, 13), (13, 15),
     (12, 14), (14, 16), (0, 5), (0, 6)
 ]
+
 def draw_skeleton(img, kpts_xy):
     for a, b in SKELETON_EDGES:
         pa = kpts_xy[a] if kpts_xy else None
@@ -263,14 +290,12 @@ def extract_people(result):
             pts = []
             for j in range(17):
                 conf = float(kpts_conf_all[i][j])
-                if conf >= 0.35:
-                    pts.append((float(kpts_xy_all[i][j][0]), float(kpts_xy_all[i][j][1])))
-                else:
-                    pts.append(None)
+                pts.append((float(kpts_xy_all[i][j][0]), float(kpts_xy_all[i][j][1])) if conf >= 0.35 else None)
             kpts_xy = pts
 
         people.append({"id": track_id, "bbox": (x1, y1, x2, y2), "kpts": kpts_xy})
     return people
+
 
 class ActionSegmenter:
     def __init__(self, start_n=3, end_m=3, conf_start=0.70, conf_end=0.45):
@@ -318,54 +343,60 @@ class ActionSegmenter:
                 self._hi = 0
                 return finished, None
 
-        active = {
-            "label": self.active_label,
-            "start_ts": self.active_start_ts,
-            "elapsed_s": ts - self.active_start_ts
-        }
+        active = {"label": self.active_label, "start_ts": self.active_start_ts, "elapsed_s": ts - self.active_start_ts}
         return None, active
 
 
-print("Agent starting. Press Q to quit.")
+# -----------------------------
+# Capture helpers (low latency)
+# -----------------------------
+def open_rtsp(url: str):
+    # Force ffmpeg to use TCP and reduce internal buffering.
+    # These env vars help on Windows/OpenCV builds that use ffmpeg.
+    if RTSP_FORCE_TCP:
+        os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp|stimeout;3000000|max_delay;0"
+    else:
+        os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "stimeout;3000000|max_delay;0"
 
-pose_model = YOLO(POSE_MODEL_PATH)
-seg_model  = YOLO(SEG_MODEL_PATH)
+    cap = cv2.VideoCapture(url, cv2.CAP_FFMPEG)
+    cap.set(cv2.CAP_PROP_BUFFERSIZE, RTSP_BUFFER_SIZE)
+    return cap
 
-cap = cv2.VideoCapture(0)
-session = requests.Session()
+def grab_latest_frame(cap, attempts=3):
+    """
+    If DROP_OLD_FRAMES=True, we try to keep only the most recent frame.
+    """
+    if not DROP_OLD_FRAMES:
+        return cap.read()
 
-track_to_operator = {}
-next_operator_num = 1
-last_centers = {}
+    ok = False
+    frame = None
+    for _ in range(attempts):
+        ok = cap.grab()
+        if not ok:
+            break
+    if ok:
+        ok, frame = cap.retrieve()
+    else:
+        ok, frame = cap.read()
+    return ok, frame
 
-clip_buffers = {}
-segmenters = {}
 
-x3d = None
-frame_count = 0
-if ENABLE_X3D:
-    try:
-        x3d = X3DClassifier(X3D_MODEL_PATH, device="cpu", clip_len=X3D_CLIP_LEN, classnames=None)
-        print("X3D ENABLED.")
-    except Exception as e:
-        print("X3D failed to load, fallback only:", e)
-        x3d = None
+# -----------------------------
+# Main processing for one frame
+# -----------------------------
+def process_frame(frame, camera_id, pose_model, seg_model, x3d,
+                  track_to_operator, next_operator_num_ref, last_centers,
+                  clip_buffers, segmenters, frame_count):
 
-last_send_ts = 0.0
-
-while True:
-    ret, frame = cap.read()
-    if not ret:
-        break
-
-    now_ts = time.time()
-    frame_count += 1
     h, w = frame.shape[:2]
 
+    # Pose tracking
     pose_results = pose_model.track(frame, persist=True, verbose=False, conf=POSE_CONF, iou=POSE_IOU)
     r0 = pose_results[0]
     people = extract_people(r0)
 
+    # Segmentation persons
     seg_results = seg_model.predict(frame, verbose=False, conf=SEG_CONF, classes=[0])
     s0 = seg_results[0]
 
@@ -379,7 +410,8 @@ while True:
             mask_rs = cv2.resize(mask, (w, h), interpolation=cv2.INTER_LINEAR)
             seg_masks.append(mask_rs > SEG_MASK_THRESH)
 
-    cv2.rectangle(frame, (ZONE_X, ZONE_Y), (ZONE_X+ZONE_W, ZONE_Y+ZONE_H), (255,0,0), 2)
+    # Draw zone
+    cv2.rectangle(frame, (ZONE_X, ZONE_Y), (ZONE_X + ZONE_W, ZONE_Y + ZONE_H), (255, 0, 0), 2)
 
     payloads = []
 
@@ -389,13 +421,14 @@ while True:
         kpts_xy = p["kpts"]
 
         if tid not in track_to_operator:
-            track_to_operator[tid] = f"Operator_{next_operator_num}"
-            next_operator_num += 1
+            track_to_operator[tid] = f"{camera_id}_Operator_{next_operator_num_ref[0]}"
+            next_operator_num_ref[0] += 1
         op_name = track_to_operator[tid]
 
         if tid not in segmenters:
             segmenters[tid] = ActionSegmenter()
 
+        # Blur by matched person mask
         best_iou = 0.0
         best_mask = None
         tb = (x1, y1, x2, y2)
@@ -411,39 +444,44 @@ while True:
         else:
             blur_region(frame, x1, y1, x2, y2, k=BLUR_K)
 
-        cx, cy = (x1+x2)/2.0, (y1+y2)/2.0
-        in_zone = (ZONE_X < cx < ZONE_X+ZONE_W) and (ZONE_Y < cy < ZONE_Y+ZONE_H)
-        spd = movement_speed(tid, cx, cy, now_ts, last_centers)
+        # Features
+        cx, cy = (x1 + x2) / 2.0, (y1 + y2) / 2.0
+        in_zone = (ZONE_X < cx < ZONE_X + ZONE_W) and (ZONE_Y < cy < ZONE_Y + ZONE_H)
+        spd = movement_speed((camera_id, tid), cx, cy, time.time(), last_centers)
 
         head_dir = estimate_head_direction(kpts_xy) if kpts_xy else "Unknown"
         hands = hands_state(kpts_xy) if kpts_xy else "Unknown"
         posture = posture_state(kpts_xy) if kpts_xy else "Unknown"
 
+        # Default action (fallback)
         action_label = classify_fallback(head_dir, hands, posture, spd, in_zone)
         action_conf = 0.60
 
+        # Optional: X3D
         if x3d is not None:
-            ix1 = clamp(int(x1), 0, w-1)
-            iy1 = clamp(int(y1), 0, h-1)
-            ix2 = clamp(int(x2), 0, w-1)
-            iy2 = clamp(int(y2), 0, h-1)
+            ix1 = clamp(int(x1), 0, w - 1)
+            iy1 = clamp(int(y1), 0, h - 1)
+            ix2 = clamp(int(x2), 0, w - 1)
+            iy2 = clamp(int(y2), 0, h - 1)
             crop = frame[iy1:iy2, ix1:ix2].copy() if (ix2 > ix1 and iy2 > iy1) else None
 
             if crop is not None and crop.size > 0:
-                crop = cv2.resize(crop, (256,256), interpolation=cv2.INTER_LINEAR)
-                if tid not in clip_buffers:
-                    clip_buffers[tid] = deque(maxlen=X3D_CLIP_LEN)
-                clip_buffers[tid].append(crop)
+                crop = cv2.resize(crop, (256, 256), interpolation=cv2.INTER_LINEAR)
+                key = (camera_id, tid)
+                if key not in clip_buffers:
+                    clip_buffers[key] = deque(maxlen=X3D_CLIP_LEN)
+                clip_buffers[key].append(crop)
 
-                if len(clip_buffers[tid]) == X3D_CLIP_LEN and (frame_count % X3D_LABEL_EVERY_N_FRAMES == 0):
+                if len(clip_buffers[key]) == X3D_CLIP_LEN and (frame_count % X3D_LABEL_EVERY_N_FRAMES == 0):
                     try:
-                        action_label, action_conf = x3d.predict(list(clip_buffers[tid]))
+                        action_label, action_conf = x3d.predict(list(clip_buffers[key]))
                     except Exception:
                         pass
 
-        finished, active = segmenters[tid].update(action_label, float(action_conf), now_ts)
+        finished, active = segmenters[tid].update(action_label, float(action_conf), time.time())
 
         payloads.append({
+            "camera_id": camera_id,
             "worker_name": op_name,
             "activity_type": action_label,
             "confidence": round(float(action_conf), 3),
@@ -456,6 +494,7 @@ while True:
             dur_min = finished["duration_s"] / 60.0
 
             payloads.append({
+                "camera_id": camera_id,
                 "worker_name": op_name,
                 "activity_type": finished["label"],
                 "start_time": start_iso,
@@ -465,27 +504,125 @@ while True:
                 "is_log": True
             })
 
-        cv2.rectangle(frame, (int(x1),int(y1)), (int(x2),int(y2)), (255,0,0), 2)
+        # UI
+        cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)), (255, 0, 0), 2)
         if kpts_xy:
             draw_skeleton(frame, kpts_xy)
 
         txt = f"{op_name} {action_label} {action_conf:.2f}"
         if active:
             txt += f" | {active['elapsed_s']:.1f}s"
-        cv2.putText(frame, txt, (int(x1), max(20, int(y1)-10)),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,255,0), 2)
+        cv2.putText(frame, txt, (int(x1), max(20, int(y1) - 10)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
 
-    if (now_ts - last_send_ts) >= SEND_EVERY_SEC and payloads:
-        for payload in payloads:
-            try:
-                session.post(N8N_URL, json=payload, timeout=3)
-            except Exception as e:
-                print("n8n POST error:", e)
-        last_send_ts = now_ts
+    return frame, payloads
 
-    cv2.imshow("Agent", frame)
-    if cv2.waitKey(1) & 0xFF == ord("q"):
-        break
 
-cap.release()
-cv2.destroyAllWindows()
+# -----------------------------
+# Main
+# -----------------------------
+def main():
+    print("Agent starting. Press Q to quit.")
+
+    pose_model = YOLO(POSE_MODEL_PATH)
+    seg_model = YOLO(SEG_MODEL_PATH)
+
+    session = requests.Session()
+
+    # Captures
+    cap_laptop = None
+    cap_rtsp = None
+
+    if MODE in ("both", "laptop"):
+        cap_laptop = cv2.VideoCapture(LAPTOP_CAM_INDEX)
+        if not cap_laptop.isOpened():
+            print("[WARN] Laptop webcam failed to open.")
+            cap_laptop = None
+
+    if MODE in ("both", "rtsp"):
+        cap_rtsp = open_rtsp(RTSP_URL)
+        if not cap_rtsp.isOpened():
+            print("[WARN] RTSP stream failed to open. Check URL/password/RTSP enabled.")
+            cap_rtsp = None
+
+    if cap_laptop is None and cap_rtsp is None:
+        raise RuntimeError("No cameras opened. Fix laptop cam or RTSP stream.")
+
+    # X3D
+    x3d = None
+    frame_count = 0
+    if ENABLE_X3D:
+        try:
+            x3d = X3DClassifier(X3D_MODEL_PATH, device="cpu", clip_len=X3D_CLIP_LEN, classnames=None)
+            print("X3D ENABLED.")
+        except Exception as e:
+            print("X3D failed to load, fallback only:", e)
+            x3d = None
+
+    last_send_ts = 0.0
+
+    # Shared tracking state (kept separate per camera via keying)
+    track_to_operator = {}
+    next_operator_num_ref = [1]
+    last_centers = {}
+
+    clip_buffers = {}
+    segmenters = {}
+
+    while True:
+        now_ts = time.time()
+        frame_count += 1
+
+        frames_to_show = []
+
+        all_payloads = []
+
+        # Laptop
+        if cap_laptop is not None:
+            ok0, f0 = cap_laptop.read()
+            if ok0 and f0 is not None:
+                f0, payloads0 = process_frame(
+                    f0, "laptop", pose_model, seg_model, x3d,
+                    track_to_operator, next_operator_num_ref, last_centers,
+                    clip_buffers, segmenters, frame_count
+                )
+                frames_to_show.append(("Laptop", f0))
+                all_payloads.extend(payloads0)
+
+        # RTSP
+        if cap_rtsp is not None:
+            ok1, f1 = grab_latest_frame(cap_rtsp)
+            if ok1 and f1 is not None:
+                f1, payloads1 = process_frame(
+                    f1, "rtsp", pose_model, seg_model, x3d,
+                    track_to_operator, next_operator_num_ref, last_centers,
+                    clip_buffers, segmenters, frame_count
+                )
+                frames_to_show.append(("RTSP", f1))
+                all_payloads.extend(payloads1)
+
+        # Send to n8n periodically
+        if (now_ts - last_send_ts) >= SEND_EVERY_SEC and all_payloads:
+            for payload in all_payloads:
+                try:
+                    session.post(N8N_URL, json=payload, timeout=3)
+                except Exception as e:
+                    print("n8n POST error:", e)
+            last_send_ts = now_ts
+
+        # Show windows
+        for title, fr in frames_to_show:
+            cv2.imshow(f"Agent - {title}", fr)
+
+        if cv2.waitKey(1) & 0xFF == ord("q"):
+            break
+
+    if cap_laptop is not None:
+        cap_laptop.release()
+    if cap_rtsp is not None:
+        cap_rtsp.release()
+    cv2.destroyAllWindows()
+
+
+if __name__ == "__main__":
+    main()
