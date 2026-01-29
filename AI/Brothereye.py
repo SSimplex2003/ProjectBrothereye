@@ -39,7 +39,7 @@ X3D_LABEL_EVERY_N_FRAMES = 8
 
 # Cameras
 LAPTOP_CAM_INDEX = 0
-RTSP_URL = "rtsp://admin:Calin2003!@192.168.1.135:554/cam/realmonitor?channel=1&subtype=1"
+RTSP_URL = "rtsp://admin:Calin2003@192.168.1.135:554/cam/realmonitor?channel=1&subtype=1"
 
 # Choose behavior:
 #   "both" = process both feeds (slower)
