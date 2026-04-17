@@ -5,3 +5,29 @@ ultralytics
 torch
 torchvision
 pytorchvideo
+# AI Multi-Camera Streaming Server
+# Install with: pip install -r requirements.txt
+#
+# Optional: for GPU acceleration install PyTorch with CUDA first:
+#   https://pytorch.org/get-started/locally/
+# Then run pip install -r requirements.txt as usual.
+
+# Web server
+flask>=3.0.0
+flask-cors>=4.0.0
+
+# Computer vision + AI
+opencv-python>=4.9.0
+ultralytics>=8.2.0
+numpy>=1.26.0
+
+# HTTP client (n8n webhook forwarding)
+requests>=2.31.0
+
+# PyTorch (CPU build -- remove the --extra-index-url line if you have CUDA)
+torch>=2.2.0
+torchvision>=0.17.0
+--extra-index-url https://download.pytorch.org/whl/cpu
+
+# X3D model (loaded via torch.hub from facebookresearch/pytorchvideo)
+pytorchvideo>=0.1.5
