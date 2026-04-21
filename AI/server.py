@@ -8,7 +8,7 @@ Features
 - Add any number of cameras at runtime via REST API (RTSP, USB/index, HTTP MJPEG)
 - Per-camera MJPEG stream with YOLO pose + segmentation overlay
 - Optional X3D action classification per camera
-- n8n webhook forwarding
+- Direct Postgres logging (replaces n8n) — writes to activity_logs + activity_state
 - CORS enabled for Next.js / v0 frontend
 - /api/health and /api/stream-sources for frontend integration
 
@@ -22,14 +22,33 @@ Quick start
          -H "Content-Type: application/json" \
          -d '{"id":"cam1","source":"rtsp://admin:pass@192.168.0.101:554/stream"}'
 
-    curl -X POST http://localhost:5000/api/cameras \
-         -H "Content-Type: application/json" \
-         -d '{"id":"laptop","source":0}'
-
     # Watch in browser
     http://localhost:5000               <- dashboard (all streams)
     http://localhost:5000/stream/cam1   <- raw MJPEG
     http://localhost:5000/snapshot/cam1 <- single JPEG
+
+Postgres setup
+--------------
+    Set the PG_DSN environment variable (or edit PG_DSN below):
+        PG_DSN=postgresql://user:pass@localhost:5432/mydb
+
+    Required tables (run once):
+
+        CREATE TABLE IF NOT EXISTS activity_logs (
+            id               SERIAL PRIMARY KEY,
+            worker_name      TEXT,
+            activity_type    TEXT,
+            duration_minutes NUMERIC,
+            start_time       TIMESTAMPTZ,
+            end_time         TIMESTAMPTZ
+        );
+
+        CREATE TABLE IF NOT EXISTS activity_state (
+            worker_name      TEXT PRIMARY KEY,
+            last_activity    TEXT,
+            last_start_time  TIMESTAMPTZ,
+            last_seen_time   TIMESTAMPTZ
+        );
 
 API reference
 -------------
@@ -102,8 +121,16 @@ ENABLE_X3D        = os.getenv("ENABLE_X3D", "1") == "1"
 X3D_CLIP_LEN      = 16
 X3D_LABEL_EVERY_N = 8
 
+# ---------------------------------------------------------------------------
+# Postgres config  --  set PG_DSN to enable direct DB logging
+# Example: postgresql://user:pass@localhost:5432/mydb
+# Leave empty to disable DB logging (no error, just skipped)
+# ---------------------------------------------------------------------------
+PG_DSN      = os.getenv("PG_DSN", "postgresql://postgres:mysecretpassword@localhost:5432/postgres")
+PG_ENABLED  = bool(PG_DSN)
+# n8n is kept as optional fallback — set N8N_ENABLED=0 to fully disable
 N8N_URL        = os.getenv("N8N_URL", "http://localhost:5678/webhook/work-monitor")
-N8N_ENABLED    = os.getenv("N8N_ENABLED", "1") == "1"
+N8N_ENABLED    = os.getenv("N8N_ENABLED", "0") == "1"   # off by default now
 SEND_EVERY_SEC = 2.0
 
 STREAM_JPEG_QUALITY = int(os.getenv("JPEG_QUALITY", "75"))
@@ -128,6 +155,67 @@ SKELETON_EDGES = [
     (5, 11), (6, 12), (11, 12), (11, 13), (13, 15),
     (12, 14), (14, 16), (0, 5), (0, 6),
 ]
+
+
+# ---------------------------------------------------------------------------
+# Postgres helper
+# ---------------------------------------------------------------------------
+class PgWriter:
+    """
+    Thread-safe Postgres writer.
+    Replicates the logic from the n8n workflow:
+      - activity_state  : upsert last known activity per worker (like n8n Calculate + Upsert)
+      - activity_logs   : insert completed activity segments   (like n8n Store Activity)
+    Connection is lazy — created on first write, auto-reconnects on failure.
+    """
+
+    def __init__(self, dsn: str):
+        self._dsn   = dsn
+        self._conn  = None
+        self._lock  = threading.Lock()
+
+    def _get_conn(self):
+        import psycopg2
+        if self._conn is None or self._conn.closed:
+            self._conn = psycopg2.connect(self._dsn)
+            self._conn.autocommit = True
+            log.info("Postgres connected.")
+        return self._conn
+
+    def upsert_state(self, worker_name: str, activity: str, start_time: str, seen_time: str):
+        """Update activity_state — mirrors the n8n Upsert nodes."""
+        sql = """
+            INSERT INTO activity_state (worker_name, last_activity, last_start_time, last_seen_time)
+            VALUES (%s, %s, %s::timestamptz, %s::timestamptz)
+            ON CONFLICT (worker_name) DO UPDATE SET
+                last_activity   = EXCLUDED.last_activity,
+                last_start_time = EXCLUDED.last_start_time,
+                last_seen_time  = EXCLUDED.last_seen_time;
+        """
+        self._execute(sql, (worker_name, activity, start_time, seen_time))
+
+    def insert_log(self, worker_name: str, activity: str,
+                   duration_minutes: float, start_time: str, end_time: str):
+        """Insert a completed activity segment — mirrors n8n Store Activity."""
+        sql = """
+            INSERT INTO activity_logs (worker_name, activity_type, duration_minutes, start_time, end_time)
+            VALUES (%s, %s, %s, %s::timestamptz, %s::timestamptz);
+        """
+        self._execute(sql, (worker_name, activity, duration_minutes, start_time, end_time))
+
+    def _execute(self, sql: str, params: tuple):
+        with self._lock:
+            try:
+                cur = self._get_conn().cursor()
+                cur.execute(sql, params)
+                cur.close()
+            except Exception as exc:
+                log.warning("Postgres write failed: %s — will retry next event.", exc)
+                try:
+                    self._conn.close()
+                except Exception:
+                    pass
+                self._conn = None
 
 
 # ---------------------------------------------------------------------------
@@ -391,7 +479,7 @@ class CameraWorker:
     def __init__(self, camera_id: str, source,
                  label: str = "", zone: tuple = (100, 100, 400, 400),
                  pose_model=None, seg_model=None, x3d=None,
-                 n8n_session=None, event_log=None):
+                 n8n_session=None, pg_writer=None, event_log=None):
         self.camera_id   = camera_id
         self.source      = source
         self.label       = label or camera_id
@@ -400,6 +488,7 @@ class CameraWorker:
         self.seg_model   = seg_model
         self.x3d         = x3d
         self.n8n_session = n8n_session
+        self.pg          = pg_writer        # PgWriter instance or None
         self.event_log   = event_log
 
         self._jpeg      = None
@@ -416,6 +505,10 @@ class CameraWorker:
         self.segmenters:   dict = {}
         self.last_send_ts  = 0.0
         self.frame_count   = 0
+
+        # Per-worker activity state (mirrors activity_state table)
+        # { worker_name -> {"activity": str, "start_time": str} }
+        self._worker_state: dict = {}
 
         self.fps_actual = 0.0
         self.connected  = False
@@ -480,6 +573,45 @@ class CameraWorker:
             return cap.retrieve()
         return cap.read()
 
+    def _pg_track(self, op_name: str, action: str, now_iso: str):
+        """
+        Replicates the n8n Calculate + Upsert + Insert logic directly.
+        - Always upserts activity_state with latest seen time.
+        - When activity changes, inserts a completed row into activity_logs.
+        """
+        if self.pg is None:
+            return
+
+        state = self._worker_state.get(op_name)
+
+        if state is None:
+            # First time we see this worker — initialize state, no log insert
+            self._worker_state[op_name] = {"activity": action, "start_time": now_iso}
+            self.pg.upsert_state(op_name, action, now_iso, now_iso)
+            return
+
+        if state["activity"] == action:
+            # Same activity — just update last_seen_time
+            self.pg.upsert_state(op_name, action, state["start_time"], now_iso)
+            return
+
+        # Activity changed — insert completed segment into activity_logs
+        start_dt  = datetime.fromisoformat(state["start_time"])
+        end_dt    = datetime.fromisoformat(now_iso)
+        duration  = max(0.0, (end_dt - start_dt).total_seconds() / 60.0)
+
+        self.pg.insert_log(
+            worker_name=op_name,
+            activity=state["activity"],
+            duration_minutes=round(duration, 2),
+            start_time=state["start_time"],
+            end_time=now_iso,
+        )
+
+        # Update in-memory state and upsert new activity
+        self._worker_state[op_name] = {"activity": action, "start_time": now_iso}
+        self.pg.upsert_state(op_name, action, now_iso, now_iso)
+
     def _run(self):
         log.info("[%s] Worker starting (source=%s)", self.camera_id, self.source)
         cap             = None
@@ -534,6 +666,7 @@ class CameraWorker:
             elapsed = max(1e-6, now - t0)
             self.fps_actual = 0.9 * self.fps_actual + 0.1 * (1.0 / elapsed)
 
+            # n8n fallback (off by default, kept for backwards compatibility)
             if (N8N_ENABLED and self.n8n_session and payloads
                     and (now - self.last_send_ts) >= SEND_EVERY_SEC):
                 for p in payloads:
@@ -574,6 +707,7 @@ class CameraWorker:
 
         payloads = []
         now      = time.time()
+        now_iso  = datetime.now(timezone.utc).isoformat()
 
         for p in people:
             tid             = p["id"]
@@ -629,12 +763,15 @@ class CameraWorker:
 
             finished, active = self.segmenters[tid].update(action, float(conf), now)
 
+            # Write to Postgres directly (replaces n8n)
+            self._pg_track(op_name, action, now_iso)
+
             ev = {
                 "camera_id":     self.camera_id,
                 "worker_name":   op_name,
                 "activity_type": action,
                 "confidence":    round(float(conf), 3),
-                "event_time":    datetime.now(timezone.utc).isoformat(),
+                "event_time":    now_iso,
             }
             payloads.append(ev)
             if self.event_log is not None:
@@ -650,7 +787,7 @@ class CameraWorker:
                     "end_time":         datetime.fromtimestamp(
                         finished["end_ts"], tz=timezone.utc).isoformat(),
                     "duration_minutes": round(finished["duration_s"] / 60.0, 2),
-                    "event_time":       datetime.now(timezone.utc).isoformat(),
+                    "event_time":       now_iso,
                     "is_log":           True,
                 }
                 payloads.append(log_ev)
@@ -693,6 +830,13 @@ class StreamingServer:
 
         self.n8n_session = requests.Session() if N8N_ENABLED else None
 
+        self.pg = None
+        if PG_ENABLED:
+            self.pg = PgWriter(PG_DSN)
+            log.info("Postgres logging enabled.")
+        else:
+            log.info("Postgres logging disabled (set PG_DSN env var to enable).")
+
         self._cameras: dict[str, CameraWorker] = {}
         self._cam_lock = threading.Lock()
         self._events: deque = deque(maxlen=MAX_EVENTS)
@@ -714,6 +858,7 @@ class StreamingServer:
                 seg_model=self.seg_model,
                 x3d=self.x3d,
                 n8n_session=self.n8n_session,
+                pg_writer=self.pg,
                 event_log=self._events,
             )
             worker.start()
@@ -802,7 +947,8 @@ class StreamingServer:
                 "<body>"
                 f"<h1>AI Stream Monitor</h1>"
                 f"<p>{len(cams)} camera(s) active &nbsp;|&nbsp; "
-                f'<a href="/api/cameras" style="color:#0fb3bc">/api/cameras</a></p>'
+                f'<a href="/api/cameras" style="color:#0fb3bc">/api/cameras</a> &nbsp;|&nbsp; '
+                f'DB: {"✓ connected" if PG_ENABLED else "✗ disabled"}</p>'
                 f'<div>{rows if rows else "<p>No cameras added yet. POST to /api/cameras</p>"}</div>'
                 "</body></html>"
             )
@@ -836,21 +982,15 @@ class StreamingServer:
                 "status":            "ok",
                 "cameras_total":     len(cams),
                 "cameras_connected": sum(1 for c in cams if c["connected"]),
+                "db_enabled":        PG_ENABLED,
             })
 
         @app.route("/api/stream-sources", methods=["GET"])
         def api_stream_sources():
-            """
-            Returns every camera with stream_url and snapshot_url pre-built.
-            Pass ?base=http://YOUR_SERVER_IP:5000 so the frontend embeds the
-            correct external address in <img src> tags.
-            If omitted the URL is inferred from the incoming request host.
-            """
             base = request.args.get("base", "").rstrip("/")
             if not base:
                 scheme = "https" if request.is_secure else "http"
                 base   = f"{scheme}://{request.host}"
-
             sources = []
             for cam in srv.list_cameras():
                 sources.append({
@@ -916,37 +1056,18 @@ class StreamingServer:
         def api_docs():
             return jsonify({
                 "endpoints": [
-                    {"method": "GET",    "path": "/",
-                     "description": "HTML dashboard with live streams"},
-                    {"method": "GET",    "path": "/stream/<id>",
-                     "description": "MJPEG stream for camera <id>"},
-                    {"method": "GET",    "path": "/snapshot/<id>",
-                     "description": "Single JPEG snapshot"},
-                    {"method": "GET",    "path": "/api/health",
-                     "description": "Server health + camera counts"},
-                    {"method": "GET",    "path": "/api/stream-sources",
-                     "description": "All cameras with stream/snapshot URLs pre-built",
-                     "params": {"base": "Base URL to embed (optional, auto-detected if omitted)"}},
-                    {"method": "GET",    "path": "/api/cameras",
-                     "description": "List all cameras"},
-                    {"method": "POST",   "path": "/api/cameras",
-                     "description": "Add a camera",
-                     "body": {
-                         "id":     "string (required) — unique slug",
-                         "source": "int | string (required) — see source_formats",
-                         "label":  "string (optional)",
-                         "zone":   "[x, y, w, h] ints (optional, default [100,100,400,400])",
-                     }},
-                    {"method": "GET",    "path": "/api/cameras/<id>",
-                     "description": "Single camera status"},
-                    {"method": "DELETE", "path": "/api/cameras/<id>",
-                     "description": "Stop and remove a camera"},
-                    {"method": "GET",    "path": "/api/events",
-                     "description": f"Last {MAX_EVENTS} activity events (all cameras)"},
-                    {"method": "GET",    "path": "/api/events/<id>",
-                     "description": "Events filtered by camera id"},
-                    {"method": "GET",    "path": "/api/docs",
-                     "description": "This reference"},
+                    {"method": "GET",    "path": "/",                   "description": "HTML dashboard"},
+                    {"method": "GET",    "path": "/stream/<id>",        "description": "MJPEG stream"},
+                    {"method": "GET",    "path": "/snapshot/<id>",      "description": "Single JPEG snapshot"},
+                    {"method": "GET",    "path": "/api/health",         "description": "Server health + DB status"},
+                    {"method": "GET",    "path": "/api/stream-sources", "description": "All cameras with stream/snapshot URLs"},
+                    {"method": "GET",    "path": "/api/cameras",        "description": "List all cameras"},
+                    {"method": "POST",   "path": "/api/cameras",        "description": "Add a camera"},
+                    {"method": "GET",    "path": "/api/cameras/<id>",   "description": "Single camera status"},
+                    {"method": "DELETE", "path": "/api/cameras/<id>",   "description": "Remove a camera"},
+                    {"method": "GET",    "path": "/api/events",         "description": f"Last {MAX_EVENTS} events"},
+                    {"method": "GET",    "path": "/api/events/<id>",    "description": "Events for one camera"},
+                    {"method": "GET",    "path": "/api/docs",           "description": "This reference"},
                 ],
                 "source_formats": {
                     "usb":    "0  (integer index; 1, 2 for additional USB cameras)",
@@ -970,14 +1091,6 @@ class StreamingServer:
 if __name__ == "__main__":
     server = StreamingServer()
 
-    # -----------------------------------------------------------------------
-    # Auto-start cameras from environment variable (optional convenience)
-    #
-    # Format: id:source,id2:source2,...
-    # Example:
-    #   INIT_CAMERAS=laptop:0,cam1:rtsp://admin:pass@192.168.0.101:554/stream \
-    #       python stream_server.py
-    # -----------------------------------------------------------------------
     init_env = os.getenv("INIT_CAMERAS", "")
     if init_env:
         for entry in init_env.split(","):

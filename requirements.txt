@@ -24,6 +24,9 @@ numpy>=1.26.0
 # HTTP client (n8n webhook forwarding)
 requests>=2.31.0
 
+# Postgres direct logging (replaces n8n)
+psycopg2-binary>=2.9.9
+
 # PyTorch (CPU build -- remove the --extra-index-url line if you have CUDA)
 torch>=2.2.0
 torchvision>=0.17.0
