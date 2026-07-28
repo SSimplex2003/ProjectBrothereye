@@ -258,12 +258,13 @@ class ToolClassifier:
 
     INPUT_SIZE = 128
 
-    def __init__(self, model):
-        self._model = model
+    def __init__(self, model, device: str = "cpu"):
+        self._model  = model
+        self._device = device
 
     def predict(self, crop_bgr: np.ndarray) -> Tuple[str, float]:
         resized = cv2.resize(crop_bgr, (self.INPUT_SIZE, self.INPUT_SIZE))
-        result  = self._model.predict(resized, verbose=False)
+        result  = self._model.predict(resized, verbose=False, device=self._device)
         if result and result[0].probs is not None:
             idx  = int(result[0].probs.top1)
             conf = float(result[0].probs.top1conf)

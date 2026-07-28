@@ -92,27 +92,32 @@ class StreamingServer:
     """Orchestrates cameras, models and the Flask HTTP API."""
 
     def __init__(self):
-        log.info("Loading YOLO models …")
+        log.info("Device: %s", cfg.DEVICE.upper())
+
         self.pose_model = YOLO(cfg.POSE_MODEL)
-        self.seg_model  = YOLO(cfg.SEG_MODEL)
-        log.info("YOLO models ready.")
+        self.pose_model.to(cfg.DEVICE)
+
+        self.seg_model = YOLO(cfg.SEG_MODEL)
+        self.seg_model.to(cfg.DEVICE)
 
         self.x3d: Optional[X3DClassifier] = None
         if cfg.X3D_ENABLED:
             try:
                 self.x3d = X3DClassifier(
-                    cfg.X3D_MODEL, device="cpu", clip_len=cfg.X3D_CLIP_LEN)
-                log.info("X3D classifier ready.")
+                    cfg.X3D_MODEL, device=cfg.DEVICE, clip_len=cfg.X3D_CLIP_LEN)
+                log.info("X3D ready on %s", cfg.DEVICE.upper())
             except Exception as exc:
                 log.warning("X3D skipped (%s) — heuristic fallback only.", exc)
 
         self.tool_classifier: Optional[ToolClassifier] = None
         if Path(cfg.TOOL_MODEL).exists():
-            self.tool_classifier = ToolClassifier(YOLO(cfg.TOOL_MODEL))
-            log.info("Tool classifier ready: %s", cfg.TOOL_MODEL)
+            tool_yolo = YOLO(cfg.TOOL_MODEL)
+            tool_yolo.to(cfg.DEVICE)
+            self.tool_classifier = ToolClassifier(tool_yolo, device=cfg.DEVICE)
+            log.info("Tool classifier ready on %s", cfg.DEVICE.upper())
         else:
-            log.info("Tool classifier not found — run training/collect_crops.py "
-                     "then training/train_classifier.py")
+            log.info("Tool classifier not trained yet — "
+                     "run training/collect_crops.py then training/train_classifier.py")
 
         self.pg: Optional[PgWriter] = None
         if cfg.PG_ENABLED:

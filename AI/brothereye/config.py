@@ -1,5 +1,17 @@
 import os
+import torch
 from pathlib import Path
+
+def _select_device() -> str:
+    if torch.cuda.is_available():
+        name = torch.cuda.get_device_name(0)
+        vram = round(torch.cuda.get_device_properties(0).total_memory / 1024 ** 3, 1)
+        print(f"[Brothereye] GPU detected: {name} ({vram} GB) — using CUDA")
+        return "cuda"
+    print("[Brothereye] No GPU detected — using CPU")
+    return "cpu"
+
+DEVICE = os.getenv("DEVICE") or _select_device()
 
 _AI   = Path(__file__).resolve().parents[1]
 ROOT  = _AI.parent

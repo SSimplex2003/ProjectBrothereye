@@ -258,11 +258,12 @@ class CameraWorker:
 
         pose_results = self.pose_model.track(
             frame, persist=True, verbose=False,
-            conf=cfg.POSE_CONF, iou=cfg.POSE_IOU)
+            conf=cfg.POSE_CONF, iou=cfg.POSE_IOU, device=cfg.DEVICE)
         people = extract_people(pose_results[0])
 
         seg_results = self.seg_model.predict(
-            frame, verbose=False, conf=cfg.SEG_CONF, classes=[0])
+            frame, verbose=False, conf=cfg.SEG_CONF,
+            classes=[0], device=cfg.DEVICE)
         s0 = seg_results[0]
         seg_boxes, seg_masks = [], []
         if s0.boxes is not None and len(s0.boxes) > 0 and s0.masks is not None:

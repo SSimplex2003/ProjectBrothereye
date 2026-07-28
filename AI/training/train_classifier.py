@@ -83,6 +83,11 @@ def main() -> None:
     else:
         print(f"\nWeights not found at {best}")
 
+    import shutil
+    if CROP_DIR.exists():
+        shutil.rmtree(CROP_DIR)
+        print(f"\nCrops deleted ({CROP_DIR.name}) — weights are all that's needed.")
+
     print("\n" + "=" * 60)
     print("Tool classifier ready. Start the server to use it.")
     print("=" * 60)
