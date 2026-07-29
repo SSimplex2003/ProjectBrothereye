@@ -11,7 +11,7 @@ works out of the box as a fallback.
 | Model | Purpose | Training time (CPU) | Input |
 |---|---|---|---|
 | **Tool Classifier** (YOLOv8n-cls) | Identifies which tool is in the worker's hand | ~15 min | Single frame crop of the hand region |
-| **X3D** (X3D-XS) | Classifies the full action from a 16-frame video clip | ~45 min | 16-frame clip of the person |
+| **Action Classifier** (YOLOv8n-cls) | Classifies the action from the full-body crop | ~15 min | Single frame crop of the whole person |
 
 Train the **Tool Classifier first** — the server can also use it to learn a
 workflow from a reference video (`/api/workflow/<id>/learn`).
@@ -102,22 +102,24 @@ both steps.
 
 ---
 
-## Step 3 — Train X3D (optional but recommended)
+## Step 3 — Train the action classifier (optional but recommended)
 
-X3D looks at a 16-frame clip of the whole person and can catch actions that
+The action classifier looks at the full-body crop and can catch actions that
 are ambiguous from the hand crop alone.
 
 ```powershell
-.venv\Scripts\python.exe AI\training\train_x3d.py
+.venv\Scripts\python.exe AI\training\collect_action_frames.py
+.venv\Scripts\python.exe AI\training\train_action_classifier.py
 ```
 
-Training runs for 20 epochs.  Best weights saved to:
+Training runs for up to 50 epochs with early stopping (patience = 12).  Best
+weights saved to:
 ```
-AI/runs/x3d/best.pt
+AI/runs/action_classifier/weights/best.pt
 ```
 
-X3D is optional.  If the checkpoint is not present the server runs with the
-tool classifier and wrist heuristic only.
+The action classifier is optional.  If the checkpoint is not present the
+server runs with the tool classifier and wrist heuristic only.
 
 ---
 
@@ -155,12 +157,13 @@ The learned steps are saved automatically and restored when the server restarts.
 
 ## Retraining after adding new videos
 
-Just re-run all three steps.  The scripts overwrite the previous output.
+Just re-run all four steps.  The scripts overwrite the previous output.
 
 ```powershell
 .venv\Scripts\python.exe AI\training\collect_crops.py
 .venv\Scripts\python.exe AI\training\train_classifier.py
-.venv\Scripts\python.exe AI\training\train_x3d.py
+.venv\Scripts\python.exe AI\training\collect_action_frames.py
+.venv\Scripts\python.exe AI\training\train_action_classifier.py
 ```
 
 Then restart the server:

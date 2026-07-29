@@ -1,4 +1,4 @@
-screwing
-place_part
-measure
 cutting
+measure
+place_part
+screwing

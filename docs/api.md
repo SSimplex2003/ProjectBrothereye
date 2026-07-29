@@ -33,7 +33,7 @@ Single JPEG frame from a camera (most recent processed frame).
   "cameras_connected": 2,
   "db_enabled": true,
   "tool_classifier": true,
-  "x3d": false
+  "action_classifier": false
 }
 ```
 

@@ -116,7 +116,7 @@ def main() -> None:
     totals: dict[str, int] = {}
 
     for cls_dir in sorted(DATA_DIR.iterdir()):
-        if not cls_dir.is_dir() or cls_dir.name == "tool_crops":
+        if not cls_dir.is_dir() or cls_dir.name in ("tool_crops", "action_crops"):
             continue
         videos = [p for p in cls_dir.iterdir() if p.suffix.lower() in VIDEO_EXTS]
         if not videos:

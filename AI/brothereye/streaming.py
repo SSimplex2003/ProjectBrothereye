@@ -5,8 +5,6 @@ from collections import deque
 from pathlib import Path
 from typing import Optional
 
-import cv2
-import numpy as np
 import requests
 from flask import Flask, Response, abort, jsonify, request
 from flask_cors import CORS
@@ -15,77 +13,10 @@ from ultralytics import YOLO
 from brothereye import config as cfg
 from brothereye.camera import CameraWorker
 from brothereye.database import PgWriter
-from brothereye.detection import ToolClassifier
+from brothereye.detection import ActionFrameClassifier, ToolClassifier
 from brothereye.tracking import WorkflowLearner, load_workflow, save_workflow
 
 log = logging.getLogger(__name__)
-
-
-class X3DClassifier:
-    """Loads an X3D checkpoint and classifies 16-frame clips."""
-
-    def __init__(self, ckpt_path: str, device: str = "cpu",
-                 clip_len: int = 16, classnames: Optional[list] = None):
-        import torch
-        import torch.nn as nn
-
-        self._torch = torch
-        self.device = device
-        self.clip_len = clip_len
-
-        if not Path(ckpt_path).exists():
-            raise FileNotFoundError(f"X3D checkpoint not found: {ckpt_path}")
-
-        ckpt = torch.load(ckpt_path, map_location="cpu")
-        if isinstance(ckpt, dict) and "model_state" in ckpt:
-            state      = ckpt["model_state"]
-            ckpt_names = ckpt.get("classnames")
-        else:
-            state      = ckpt
-            ckpt_names = None
-
-        self.classnames = classnames or ckpt_names
-        if not self.classnames:
-            raise ValueError("No classnames in checkpoint and none provided.")
-
-        model = torch.hub.load(
-            "facebookresearch/pytorchvideo", "x3d_xs", pretrained=False)
-        try:
-            in_f = model.blocks[-1].proj.in_features
-            model.blocks[-1].proj = nn.Linear(in_f, len(self.classnames))
-        except Exception:
-            in_f = model.head.projection.in_features
-            model.head.projection = nn.Linear(in_f, len(self.classnames))
-
-        model.load_state_dict(state, strict=True)
-        self.model = model.eval().to(device)
-
-    def predict(self, frames_bgr: list) -> tuple[str, float]:
-        torch      = self._torch
-        frames_rgb = [cv2.cvtColor(f, cv2.COLOR_BGR2RGB) for f in frames_bgr]
-        arr        = np.stack(frames_rgb).astype(np.float32) / 255.0
-        T, H, W, _ = arr.shape
-        scale      = 182 / min(H, W)
-        nw, nh     = int(W * scale), int(H * scale)
-        resized    = np.stack(
-            [cv2.resize(arr[t], (nw, nh)) for t in range(T)])
-        crop  = 160
-        y0    = max(0, (nh - crop) // 2)
-        x0    = max(0, (nw - crop) // 2)
-        x_in  = torch.from_numpy(
-            resized[:, y0:y0+crop, x0:x0+crop, :]
-        ).permute(3, 0, 1, 2).unsqueeze(0).to(self.device)
-        mean  = torch.tensor([0.45, 0.45, 0.45],
-                             device=self.device).view(1, 3, 1, 1, 1)
-        std   = torch.tensor([0.225, 0.225, 0.225],
-                             device=self.device).view(1, 3, 1, 1, 1)
-        x_in  = (x_in - mean) / std
-        with torch.no_grad():
-            probs = torch.softmax(self.model(x_in), dim=1)[0]
-            idx   = int(torch.argmax(probs).item())
-            label = (self.classnames[idx]
-                     if idx < len(self.classnames) else f"class_{idx}")
-            return label, float(probs[idx].item())
 
 
 class StreamingServer:
@@ -100,14 +31,19 @@ class StreamingServer:
         self.seg_model = YOLO(cfg.SEG_MODEL)
         self.seg_model.to(cfg.DEVICE)
 
-        self.x3d: Optional[X3DClassifier] = None
-        if cfg.X3D_ENABLED:
+        self.action_classifier: Optional[ActionFrameClassifier] = None
+        if cfg.ACTION_ENABLED and Path(cfg.ACTION_MODEL).exists():
             try:
-                self.x3d = X3DClassifier(
-                    cfg.X3D_MODEL, device=cfg.DEVICE, clip_len=cfg.X3D_CLIP_LEN)
-                log.info("X3D ready on %s", cfg.DEVICE.upper())
+                action_yolo = YOLO(cfg.ACTION_MODEL)
+                action_yolo.to(cfg.DEVICE)
+                self.action_classifier = ActionFrameClassifier(
+                    action_yolo, device=cfg.DEVICE)
+                log.info("Action classifier ready on %s", cfg.DEVICE.upper())
             except Exception as exc:
-                log.warning("X3D skipped (%s) — heuristic fallback only.", exc)
+                log.warning("Action classifier skipped (%s) — heuristic fallback only.", exc)
+        else:
+            log.info("Action classifier not trained yet — "
+                     "run training/collect_action_frames.py then training/train_action_classifier.py")
 
         self.tool_classifier: Optional[ToolClassifier] = None
         if Path(cfg.TOOL_MODEL).exists():
@@ -146,11 +82,11 @@ class StreamingServer:
                 source          = source,
                 label           = label or camera_id,
                 zone            = zone,
-                pose_model      = self.pose_model,
-                seg_model       = self.seg_model,
-                x3d             = self.x3d,
-                tool_classifier = self.tool_classifier,
-                workflow_steps  = workflow_steps,
+                pose_model        = self.pose_model,
+                seg_model         = self.seg_model,
+                action_classifier = self.action_classifier,
+                tool_classifier   = self.tool_classifier,
+                workflow_steps    = workflow_steps,
                 pg              = self.pg,
                 n8n_session     = self.n8n_session,
                 event_log       = self._events,
@@ -225,7 +161,7 @@ class StreamingServer:
                 for c in cams
             )
             tool_status = "✓ loaded" if srv.tool_classifier else "✗ not trained"
-            x3d_status  = "✓ loaded" if srv.x3d            else "✗ not trained"
+            action_status = "✓ loaded" if srv.action_classifier else "✗ not trained"
             db_status   = "✓ connected" if cfg.PG_ENABLED  else "✗ disabled"
             return (
                 "<html><head><title>Brothereye</title>"
@@ -236,7 +172,7 @@ class StreamingServer:
                 f"<h1>Brothereye — AI Stream Monitor</h1>"
                 f"<p>{len(cams)} camera(s) &nbsp;|&nbsp; "
                 f"Tool: {tool_status} &nbsp;|&nbsp; "
-                f"X3D: {x3d_status} &nbsp;|&nbsp; "
+                f"Action: {action_status} &nbsp;|&nbsp; "
                 f"DB: {db_status}</p>"
                 f'<div>{rows or "<p>No cameras. POST to /api/cameras</p>"}</div>'
                 "</body></html>"
@@ -272,7 +208,7 @@ class StreamingServer:
                 "cameras_connected": sum(1 for c in cams if c["connected"]),
                 "db_enabled":        cfg.PG_ENABLED,
                 "tool_classifier":   srv.tool_classifier is not None,
-                "x3d":               srv.x3d is not None,
+                "action_classifier": srv.action_classifier is not None,
             })
 
         @app.route("/api/stream-sources")

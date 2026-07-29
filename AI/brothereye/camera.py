@@ -12,7 +12,7 @@ import numpy as np
 from brothereye import config as cfg
 from brothereye.database import PgWriter
 from brothereye.detection import (
-    ScrewingDetector, ToolClassifier, WristMotionTracker,
+    ActionFrameClassifier, ScrewingDetector, ToolClassifier, WristMotionTracker,
     bbox_iou, blur_box, blur_by_mask, clamp,
     draw_skeleton, extract_people, fallback_label,
     feather_mask, hands_height, head_direction,
@@ -76,23 +76,24 @@ class CameraWorker:
                  label: str = "",
                  zone: tuple = (100, 100, 400, 400),
                  pose_model=None, seg_model=None,
-                 x3d=None, tool_classifier: Optional[ToolClassifier] = None,
+                 action_classifier: Optional[ActionFrameClassifier] = None,
+                 tool_classifier: Optional[ToolClassifier] = None,
                  workflow_steps: Optional[list] = None,
                  pg: Optional[PgWriter] = None,
                  n8n_session=None,
                  event_log: Optional[deque] = None):
 
-        self.camera_id       = camera_id
-        self.source          = source
-        self.label           = label or camera_id
-        self.zone            = zone
-        self.pose_model      = pose_model
-        self.seg_model       = seg_model
-        self.x3d             = x3d
-        self.tool_classifier = tool_classifier
-        self.pg              = pg
-        self.n8n_session     = n8n_session
-        self.event_log       = event_log
+        self.camera_id          = camera_id
+        self.source             = source
+        self.label              = label or camera_id
+        self.zone               = zone
+        self.pose_model         = pose_model
+        self.seg_model          = seg_model
+        self.action_classifier  = action_classifier
+        self.tool_classifier    = tool_classifier
+        self.pg                 = pg
+        self.n8n_session        = n8n_session
+        self.event_log          = event_log
 
         self._jpeg      = None
         self._jpeg_lock = threading.Lock()
@@ -103,7 +104,6 @@ class CameraWorker:
         self._screw_detector = ScrewingDetector()
         self._wrist_trackers: dict = {}
         self._segmenters:     dict = {}
-        self._clip_buffers:   dict = {}
         self._dur_trackers:   dict = {}
         self._osc_counters:   dict = {}
         self._cycle_counts:   dict = {}
@@ -311,18 +311,13 @@ class CameraWorker:
             ix1 = clamp(int(x1), 0, w-1);  iy1 = clamp(int(y1), 0, h-1)
             ix2 = clamp(int(x2), 0, w-1);  iy2 = clamp(int(y2), 0, h-1)
 
-            hand_crop = None
+            hand_crop   = None
+            person_crop = None
             if ix2 > ix1 and iy2 > iy1:
                 ph       = iy2 - iy1
                 hand_y1  = max(iy1, iy2 - int(ph * 0.35))
                 hand_crop = frame[hand_y1:iy2, ix1:ix2].copy()
-
                 person_crop = frame[iy1:iy2, ix1:ix2].copy()
-                clip_key    = (self.camera_id, tid)
-                if clip_key not in self._clip_buffers:
-                    self._clip_buffers[clip_key] = deque(maxlen=cfg.X3D_CLIP_LEN)
-                self._clip_buffers[clip_key].append(
-                    cv2.resize(person_crop, (256, 256)))
 
             tool_label, tool_conf = None, 0.0
             if (self.tool_classifier is not None
@@ -339,15 +334,13 @@ class CameraWorker:
             motion_label, motion_conf = self._screw_detector.classify(
                 motion_feats, hand_crop=hand_crop)
 
-            x3d_label, x3d_conf = None, None
-            clip_key = (self.camera_id, tid)
-            if (self.x3d is not None
-                    and clip_key in self._clip_buffers
-                    and len(self._clip_buffers[clip_key]) == cfg.X3D_CLIP_LEN
-                    and self._frame_count % cfg.X3D_INFER_EVERY == 0):
+            action_label, action_conf = None, None
+            if (self.action_classifier is not None
+                    and person_crop is not None
+                    and person_crop.size > 0
+                    and self._frame_count % cfg.ACTION_INFER_EVERY == 0):
                 try:
-                    x3d_label, x3d_conf = self.x3d.predict(
-                        list(self._clip_buffers[clip_key]))
+                    action_label, action_conf = self.action_classifier.predict(person_crop)
                 except Exception:
                     pass
 
@@ -355,7 +348,7 @@ class CameraWorker:
                 action, conf = tool_label, tool_conf
             else:
                 action, conf = self._screw_detector.fuse(
-                    motion_label, motion_conf, x3d_label, x3d_conf)
+                    motion_label, motion_conf, action_label, action_conf)
 
             if action in ("unknown",):
                 action = fallback_label(

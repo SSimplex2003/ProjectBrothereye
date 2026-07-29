@@ -206,13 +206,13 @@ class WristMotionTracker:
 
 
 class ScrewingDetector:
-    """Classifies wrist-motion features and fuses with an X3D prediction."""
+    """Classifies wrist-motion features and fuses with an action-classifier prediction."""
 
-    SPEED_IDLE   = 1.2
-    SPEED_MOVE   = 20.0
-    REV_THRESH   = 0.28
-    COMPACT_MAX  = 38.0
-    X3D_WEIGHT   = 0.60
+    SPEED_IDLE    = 1.2
+    SPEED_MOVE    = 20.0
+    REV_THRESH    = 0.28
+    COMPACT_MAX   = 38.0
+    ACTION_WEIGHT = 0.60
 
     def classify(self, feats: dict,
                  hand_crop: Optional[np.ndarray] = None) -> Tuple[str, float]:
@@ -241,7 +241,7 @@ class ScrewingDetector:
              x_label: Optional[str], x_conf: Optional[float]) -> Tuple[str, float]:
         if x_label is None:
             return m_label, m_conf
-        w = self.X3D_WEIGHT
+        w = self.ACTION_WEIGHT
         if m_label == "screwing" and x_label == "screwing":
             return "screwing", min(0.97, (m_conf * (1 - w) + x_conf * w) * 1.08)
         if x_conf > 0.80:
@@ -257,6 +257,29 @@ class ToolClassifier:
     """Single-frame tool-in-hand classifier backed by a YOLOv8-cls model."""
 
     INPUT_SIZE = 128
+
+    def __init__(self, model, device: str = "cpu"):
+        self._model  = model
+        self._device = device
+
+    def predict(self, crop_bgr: np.ndarray) -> Tuple[str, float]:
+        resized = cv2.resize(crop_bgr, (self.INPUT_SIZE, self.INPUT_SIZE))
+        result  = self._model.predict(resized, verbose=False, device=self._device)
+        if result and result[0].probs is not None:
+            idx  = int(result[0].probs.top1)
+            conf = float(result[0].probs.top1conf)
+            return result[0].names[idx], conf
+        return "unknown", 0.0
+
+
+class ActionFrameClassifier:
+    """Whole-person action classifier backed by a YOLOv8-cls model.
+
+    Same single-frame-crop approach as ToolClassifier, fed the full
+    person bbox instead of just the hand region.
+    """
+
+    INPUT_SIZE = 192
 
     def __init__(self, model, device: str = "cpu"):
         self._model  = model

@@ -16,10 +16,10 @@ DEVICE = os.getenv("DEVICE") or _select_device()
 _AI   = Path(__file__).resolve().parents[1]
 ROOT  = _AI.parent
 
-POSE_MODEL  = str(ROOT / "yolov8n-pose.pt")
-SEG_MODEL   = str(ROOT / "yolov8n-seg.pt")
-X3D_MODEL   = str(_AI  / "runs" / "x3d" / "best.pt")
-TOOL_MODEL  = str(_AI  / "runs" / "tool_classifier" / "weights" / "best.pt")
+POSE_MODEL   = str(ROOT / "yolov8n-pose.pt")
+SEG_MODEL    = str(ROOT / "yolov8n-seg.pt")
+ACTION_MODEL = str(_AI  / "runs" / "action_classifier" / "weights" / "best.pt")
+TOOL_MODEL   = str(_AI  / "runs" / "tool_classifier" / "weights" / "best.pt")
 WORKFLOW_DIR = _AI / "runs" / "workflows"
 
 POSE_CONF       = float(os.getenv("POSE_CONF", "0.35"))
@@ -29,9 +29,8 @@ SEG_MASK_THRESH = 0.50
 BLUR_K          = 55
 MASK_FEATHER    = 9
 
-X3D_ENABLED     = os.getenv("ENABLE_X3D", "1") == "1"
-X3D_CLIP_LEN    = 16
-X3D_INFER_EVERY = 8
+ACTION_ENABLED     = os.getenv("ENABLE_ACTION_MODEL", "1") == "1"
+ACTION_INFER_EVERY = 8
 
 TOOL_CONF_MIN    = float(os.getenv("TOOL_CONF_MIN", "0.60"))
 TOOL_INFER_EVERY = 4
