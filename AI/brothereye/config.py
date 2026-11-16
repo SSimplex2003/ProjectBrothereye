@@ -26,6 +26,7 @@ POSE_CONF       = float(os.getenv("POSE_CONF", "0.35"))
 POSE_IOU        = float(os.getenv("POSE_IOU",  "0.50"))
 SEG_CONF        = float(os.getenv("SEG_CONF",  "0.25"))
 SEG_MASK_THRESH = 0.50
+SEG_INFER_EVERY = int(os.getenv("SEG_INFER_EVERY", "3"))
 BLUR_K          = 55
 MASK_FEATHER    = 9
 

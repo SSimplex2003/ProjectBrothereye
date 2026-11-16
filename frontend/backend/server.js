@@ -374,9 +374,9 @@ app.get("/api/activity", async (req, res) => {
 
     const result = await pool.query(
       `
-      SELECT id, worker_name, activity_type, start_time, end_time, 
-             COALESCE(duration_seconds, 0) AS duration_seconds,
-             COALESCE(duration_seconds / 60.0, 0) AS duration_minutes
+      SELECT id, worker_name, activity_type, start_time, end_time,
+             COALESCE(duration_minutes * 60.0, 0) AS duration_seconds,
+             COALESCE(duration_minutes, 0) AS duration_minutes
       FROM activity_logs
       WHERE worker_name = $1 AND start_time::date >= $2::date AND start_time::date <= $3::date
       ORDER BY start_time DESC
@@ -416,9 +416,9 @@ app.get("/api/summary", async (req, res) => {
 
     const result = await pool.query(
       `
-      SELECT worker_name, activity_type, 
-             COALESCE(SUM(duration_seconds), 0)::numeric AS total_seconds,
-             COALESCE(SUM(duration_seconds / 60.0), 0)::numeric AS total_minutes
+      SELECT worker_name, activity_type,
+             COALESCE(SUM(duration_minutes * 60.0), 0)::numeric AS total_seconds,
+             COALESCE(SUM(duration_minutes), 0)::numeric AS total_minutes
       FROM activity_logs
       WHERE start_time::date >= $1::date AND start_time::date <= $2::date
       GROUP BY worker_name, activity_type

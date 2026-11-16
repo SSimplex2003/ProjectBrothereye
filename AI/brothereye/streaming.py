@@ -67,7 +67,7 @@ class StreamingServer:
 
     def add_camera(self, camera_id: str, source,
                    label: str = "",
-                   zone: tuple = (100, 100, 400, 400),
+                   zone: Optional[tuple] = None,
                    workflow_steps: Optional[list] = None) -> dict:
         with self._cam_lock:
             if camera_id in self._cameras:
@@ -233,7 +233,7 @@ class StreamingServer:
             camera_id = body.get("id", "").strip()
             source    = body.get("source")
             label     = body.get("label", camera_id)
-            zone      = tuple(body["zone"]) if body.get("zone") else (100, 100, 400, 400)
+            zone      = tuple(body["zone"]) if body.get("zone") else None
             steps     = body.get("workflow_steps")
             if not camera_id:
                 return jsonify({"error": "'id' required"}), 400
