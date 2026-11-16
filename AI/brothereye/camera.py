@@ -148,7 +148,7 @@ class CameraWorker:
             "started_at": self.started_at,
         }
 
-    def set_workflow(self, steps: list, min_step_s: float = 2.5) -> None:
+    def set_workflow(self, steps: list, min_step_s: float = 3.0) -> None:
         self._workflow_steps  = list(steps)
         self.workflow_tracker = WorkflowTracker(steps, min_step_s)
         log.info("[%s] Workflow configured: %s", self.camera_id, steps)

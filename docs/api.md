@@ -181,7 +181,7 @@ Set or replace the workflow steps for a camera.
 ```
 
 `min_step_duration_s` — how long a worker must be doing a step before it counts
-as completed (default 2.5 seconds).
+as completed (default 3 seconds).
 
 The steps are saved to disk and will be restored on server restart.
 

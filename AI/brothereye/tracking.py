@@ -103,7 +103,7 @@ class WorkflowTracker:
 
     IDLE_RESET_S = 180.0
 
-    def __init__(self, steps: list[str], min_step_s: float = 2.5):
+    def __init__(self, steps: list[str], min_step_s: float = 3.0):
         if not steps:
             raise ValueError("steps list cannot be empty")
         self._steps    = list(steps)

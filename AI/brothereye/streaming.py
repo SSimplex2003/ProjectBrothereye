@@ -306,7 +306,7 @@ class StreamingServer:
                 return jsonify({"error": "not found"}), 404
             body  = request.get_json(silent=True) or {}
             steps = body.get("steps")
-            min_s = float(body.get("min_step_duration_s", 2.5))
+            min_s = float(body.get("min_step_duration_s", 3.0))
             if not steps or not isinstance(steps, list):
                 return jsonify({"error": "'steps' must be a non-empty list"}), 400
             w.set_workflow(steps, min_s)
@@ -326,7 +326,7 @@ class StreamingServer:
                 }), 503
             body       = request.get_json(silent=True) or {}
             video_path = body.get("video_path", "").strip()
-            min_s      = float(body.get("min_step_duration_s", 2.5))
+            min_s      = float(body.get("min_step_duration_s", 3.0))
             if not video_path:
                 return jsonify({"error": "'video_path' required"}), 400
             if not Path(video_path).exists():
