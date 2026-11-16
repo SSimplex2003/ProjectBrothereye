@@ -74,7 +74,7 @@ class CameraWorker:
 
     def __init__(self, camera_id: str, source,
                  label: str = "",
-                 zone: tuple = (100, 100, 400, 400),
+                 zone: Optional[tuple] = None,
                  pose_model=None, seg_model=None,
                  action_classifier: Optional[ActionFrameClassifier] = None,
                  tool_classifier: Optional[ToolClassifier] = None,
@@ -113,6 +113,8 @@ class CameraWorker:
         self._next_op       = [1]
         self._frame_count   = 0
         self._last_n8n_ts   = 0.0
+        self._last_seg_boxes: list = []
+        self._last_seg_masks: list = []
 
         self.workflow_tracker: Optional[WorkflowTracker] = None
         self._workflow_events: list = []
@@ -148,7 +150,7 @@ class CameraWorker:
             "started_at": self.started_at,
         }
 
-    def set_workflow(self, steps: list, min_step_s: float = 2.5) -> None:
+    def set_workflow(self, steps: list, min_step_s: float = 3.0) -> None:
         self._workflow_steps  = list(steps)
         self.workflow_tracker = WorkflowTracker(steps, min_step_s)
         log.info("[%s] Workflow configured: %s", self.camera_id, steps)
@@ -252,7 +254,7 @@ class CameraWorker:
     def _process(self, frame: np.ndarray) -> tuple:
         h, w            = frame.shape[:2]
         self._frame_count += 1
-        zx, zy, zw, zh = self.zone
+        zx, zy, zw, zh = self.zone if self.zone is not None else (0, 0, w, h)
         now             = time.time()
         now_iso         = datetime.now(timezone.utc).isoformat()
 
@@ -261,16 +263,20 @@ class CameraWorker:
             conf=cfg.POSE_CONF, iou=cfg.POSE_IOU, device=cfg.DEVICE)
         people = extract_people(pose_results[0])
 
-        seg_results = self.seg_model.predict(
-            frame, verbose=False, conf=cfg.SEG_CONF,
-            classes=[0], device=cfg.DEVICE)
-        s0 = seg_results[0]
-        seg_boxes, seg_masks = [], []
-        if s0.boxes is not None and len(s0.boxes) > 0 and s0.masks is not None:
-            for i, row in enumerate(s0.boxes.xyxy.cpu().numpy()):
-                seg_boxes.append(tuple(row.tolist()))
-                mask = s0.masks.data[i].cpu().numpy().astype(np.float32)
-                seg_masks.append(cv2.resize(mask, (w, h)) > cfg.SEG_MASK_THRESH)
+        if self._frame_count % cfg.SEG_INFER_EVERY == 0:
+            seg_results = self.seg_model.predict(
+                frame, verbose=False, conf=cfg.SEG_CONF,
+                classes=[0], device=cfg.DEVICE)
+            s0 = seg_results[0]
+            seg_boxes, seg_masks = [], []
+            if s0.boxes is not None and len(s0.boxes) > 0 and s0.masks is not None:
+                for i, row in enumerate(s0.boxes.xyxy.cpu().numpy()):
+                    seg_boxes.append(tuple(row.tolist()))
+                    mask = s0.masks.data[i].cpu().numpy().astype(np.float32)
+                    seg_masks.append(cv2.resize(mask, (w, h)) > cfg.SEG_MASK_THRESH)
+            self._last_seg_boxes, self._last_seg_masks = seg_boxes, seg_masks
+        else:
+            seg_boxes, seg_masks = self._last_seg_boxes, self._last_seg_masks
 
         cv2.rectangle(frame, (zx, zy), (zx+zw, zy+zh), (255, 0, 0), 2)
         cv2.putText(frame, self.label, (zx+4, zy-8),

@@ -1,0 +1,416 @@
+{
+  "name": "Worker Activity Event Tracker with Postgres State Management",
+  "nodes": [
+    {
+      "parameters": {
+        "schema": {
+          "__rl": true,
+          "mode": "list",
+          "value": "public"
+        },
+        "table": {
+          "__rl": true,
+          "value": "activity_logs",
+          "mode": "list",
+          "cachedResultName": "activity_logs"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "duration_minutes": "={{ $json.insert.duration_minutes }}",
+            "worker_name": "={{ $json.insert.worker_name }}",
+            "activity_type": "={{ $json.insert.activity_type }}",
+            "start_time": "={{ $json.insert.start_time }}",
+            "end_time": "={{ $json.insert.end_time }}"
+          },
+          "matchingColumns": [
+            "id"
+          ],
+          "schema": [
+            {
+              "id": "id",
+              "displayName": "id",
+              "required": false,
+              "defaultMatch": true,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": true,
+              "removed": true
+            },
+            {
+              "id": "worker_name",
+              "displayName": "worker_name",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "activity_type",
+              "displayName": "activity_type",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "duration_minutes",
+              "displayName": "duration_minutes",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "start_time",
+              "displayName": "start_time",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "dateTime",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "end_time",
+              "displayName": "end_time",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "dateTime",
+              "canBeUsedToMatch": true
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "id": "3dfd8cca-2543-4c04-95cc-3470635a0281",
+      "name": "Store Activity in PostgreSQL",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        1360,
+        224
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "s6Eb5iKgcMsxukX7",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "work-monitor",
+        "options": {}
+      },
+      "id": "5be5fade-cd2d-4bb5-b6c5-9331550bca6b",
+      "name": "Receive Activity Data1",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        16,
+        320
+      ],
+      "webhookId": "be19411f-6f25-4b30-b589-4ec068668ea9",
+      "alwaysOutputData": false,
+      "executeOnce": false
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "d3646ac4-f893-4934-ab05-817bf0f4a6d9",
+              "leftValue": "={{ $json.shouldInsert }}",
+              "rightValue": false,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            },
+            {
+              "id": "967f0600-dc7e-4c1b-a4fc-7d000f4b0b77",
+              "leftValue": "={{ $json.shouldUpsert }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        1136,
+        320
+      ],
+      "id": "15f86203-4716-4886-b216-8df9bfd574bd",
+      "name": "If"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT\n  w.worker_name,\n  s.last_activity,\n  s.last_start_time\nFROM (SELECT $1::text AS worker_name) w\nLEFT JOIN activity_state s\n  ON s.worker_name = w.worker_name;\n",
+        "options": {
+          "queryReplacement": "={{ $('Receive Activity Data1').item.json.body.worker_name }}"
+        }
+      },
+      "id": "c2b37a6a-1598-456e-a3cf-d55ea282d1ff",
+      "name": "sellect postgress",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        464,
+        256
+      ],
+      "alwaysOutputData": true,
+      "credentials": {
+        "postgres": {
+          "id": "s6Eb5iKgcMsxukX7",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const worker = $json.body.worker_name\nconst activity = $json.body.activity_type\nconst eventTime = $json.event_time || new Date().toISOString();\n\nif (!activity) {\n  return {};\n}\n\nreturn {\n  json: {\n    worker_name: worker,\n    activity_type: activity,\n    event_time: eventTime\n  }\n};"
+      },
+      "id": "0589bb82-fe61-4d1a-b0e8-93208df96527",
+      "name": "Normalize",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        320
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineByPosition",
+        "options": {}
+      },
+      "id": "f957e665-5452-444d-9253-602f620bfeb7",
+      "name": "Merge",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        688,
+        320
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const worker = $json.worker_name;\nconst activity = $json.activity_type;\nconst now = new Date($json.event_time);\n\nif (!worker || !activity || isNaN(now.getTime())) {\n  return { json: { shouldInsert: false, shouldUpsert: false, reason: \"Bad input\", in: $json } };\n}\n\nconst lastActivity = $json.last_activity;        // from activity_state\nconst lastStartRaw = $json.last_start_time;      // from activity_state\n\n// If no state yet => initialize state only\nif (!lastActivity || !lastStartRaw) {\n  return {\n    json: {\n      shouldInsert: false,\n      shouldUpsert: true,\n      reason: \"Initialized\",\n      upsert: {\n        worker_name: worker,\n        last_activity: activity,\n        last_start_time: now.toISOString(),\n        last_seen_time: now.toISOString(),\n      },\n    },\n  };\n}\n\nconst lastStart = new Date(lastStartRaw);\nif (isNaN(lastStart.getTime())) {\n  return {\n    json: {\n      shouldInsert: false,\n      shouldUpsert: true,\n      reason: \"Bad last_start_time in DB\",\n      upsert: {\n        worker_name: worker,\n        last_activity: activity,\n        last_start_time: now.toISOString(),\n        last_seen_time: now.toISOString(),\n      },\n    },\n  };\n}\n\n// No change => only update last_seen_time (keep same start)\nif (activity === lastActivity) {\n  return {\n    json: {\n      shouldInsert: false,\n      shouldUpsert: true,\n      reason: \"No change\",\n      upsert: {\n        worker_name: worker,\n        last_activity: lastActivity,\n        last_start_time: lastStart.toISOString(),\n        last_seen_time: now.toISOString(),\n      },\n    },\n  };\n}\n\n// Changed => insert previous activity row\nconst durationMinutes = Math.max(\n  0,\n  Math.round((now.getTime() - lastStart.getTime()) / 60000)\n);\n\nreturn {\n  json: {\n    shouldInsert: true,\n    shouldUpsert: true,\n    reason: \"Changed\",\n    insert: {\n      worker_name: worker,\n      activity_type: lastActivity,\n      duration_minutes: durationMinutes,\n      start_time: lastStart.toISOString(),\n      end_time: now.toISOString(),\n    },\n    upsert: {\n      worker_name: worker,\n      last_activity: activity,\n      last_start_time: now.toISOString(),\n      last_seen_time: now.toISOString(),\n    },\n  },\n};\n"
+      },
+      "id": "dc8fb5f1-5532-4fc1-a8b9-ec5b5b59b288",
+      "name": "Calculate",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        912,
+        320
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO activity_state (worker_name, last_activity, last_start_time, last_seen_time)\nVALUES (\n  '{{ $('Calculate').item.json.upsert.worker_name }}',\n  '{{ $('Calculate').item.json.upsert.last_activity }}',\n  '{{ $('Calculate').item.json.upsert.last_start_time }}'::timestamptz,\n  '{{ $('Calculate').item.json.upsert.last_seen_time }}'::timestamptz\n)\nON CONFLICT (worker_name)\nDO UPDATE SET\n  last_activity = EXCLUDED.last_activity,\n  last_start_time = EXCLUDED.last_start_time,\n  last_seen_time = EXCLUDED.last_seen_time;\n",
+        "options": {
+          "queryReplacement": "="
+        }
+      },
+      "id": "51f8e869-58f8-4cd5-b7da-66ea6e9d7936",
+      "name": "Upsert state into activity_state2",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        1568,
+        224
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "s6Eb5iKgcMsxukX7",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO activity_state (worker_name, last_activity, last_start_time, last_seen_time)\nVALUES (\n  '{{ $('Calculate').item.json.upsert.worker_name }}',\n  '{{ $('Calculate').item.json.upsert.last_activity }}',\n  '{{ $('Calculate').item.json.upsert.last_start_time }}'::timestamptz,\n  '{{ $('Calculate').item.json.upsert.last_seen_time }}'::timestamptz\n)\nON CONFLICT (worker_name)\nDO UPDATE SET\n  last_activity = EXCLUDED.last_activity,\n  last_start_time = EXCLUDED.last_start_time,\n  last_seen_time = EXCLUDED.last_seen_time;\n",
+        "options": {
+          "queryReplacement": "="
+        }
+      },
+      "id": "0851aa8c-45a8-469f-a191-665d9c85ea49",
+      "name": "Upsert state into activity_state",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        1344,
+        400
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "s6Eb5iKgcMsxukX7",
+          "name": "Postgres account"
+        }
+      }
+    }
+  ],
+  "pinData": {
+    "Receive Activity Data1": [
+      {
+        "json": {
+          "headers": {
+            "host": "localhost:5678",
+            "user-agent": "python-requests/2.32.5",
+            "accept-encoding": "gzip, deflate, zstd",
+            "accept": "*/*",
+            "connection": "keep-alive",
+            "content-length": "52",
+            "content-type": "application/json"
+          },
+          "params": {},
+          "query": {},
+          "body": {
+            "worker_name": "Calin",
+            "activity_type": "Working"
+          },
+          "webhookUrl": "http://localhost:5678/webhook/work-monitor",
+          "executionMode": "production"
+        },
+        "pairedItem": {
+          "item": 0
+        }
+      }
+    ]
+  },
+  "connections": {
+    "Receive Activity Data1": {
+      "main": [
+        [
+          {
+            "node": "Normalize",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If": {
+      "main": [
+        [
+          {
+            "node": "Store Activity in PostgreSQL",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Upsert state into activity_state",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "sellect postgress": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Store Activity in PostgreSQL": {
+      "main": [
+        [
+          {
+            "node": "Upsert state into activity_state2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "sellect postgress",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge": {
+      "main": [
+        [
+          {
+            "node": "Calculate",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Calculate": {
+      "main": [
+        [
+          {
+            "node": "If",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "availableInMCP": false,
+    "timeSavedMode": "dynamic",
+    "callerPolicy": "workflowsFromSameOwner",
+    "executionTimeout": 3600
+  },
+  "versionId": "e6a5c564-f3f0-4676-a3d2-edcadf0676f7",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "b979408b0bdaa5952d9c6d28e5652e40160298fcd1b1de651ddf74539319d8f3"
+  },
+  "id": "qU4HSXcFVLq6JMfaZpK9u",
+  "tags": []
+}

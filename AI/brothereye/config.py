@@ -26,6 +26,7 @@ POSE_CONF       = float(os.getenv("POSE_CONF", "0.35"))
 POSE_IOU        = float(os.getenv("POSE_IOU",  "0.50"))
 SEG_CONF        = float(os.getenv("SEG_CONF",  "0.25"))
 SEG_MASK_THRESH = 0.50
+SEG_INFER_EVERY = int(os.getenv("SEG_INFER_EVERY", "3"))
 BLUR_K          = 55
 MASK_FEATHER    = 9
 
@@ -35,7 +36,7 @@ ACTION_INFER_EVERY = 8
 TOOL_CONF_MIN    = float(os.getenv("TOOL_CONF_MIN", "0.60"))
 TOOL_INFER_EVERY = 4
 
-PG_DSN      = os.getenv("PG_DSN", "postgresql://postgres:mysecretpassword@localhost:5432/postgres")
+PG_DSN      = os.getenv("PG_DSN", "postgresql://postgres:mysecretpassword@localhost:5432/factory_manager")
 PG_ENABLED  = bool(PG_DSN)
 N8N_URL     = os.getenv("N8N_URL", "http://localhost:5678/webhook/work-monitor")
 N8N_ENABLED = os.getenv("N8N_ENABLED", "0") == "1"
