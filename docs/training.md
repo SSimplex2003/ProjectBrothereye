@@ -64,6 +64,37 @@ currently has the most data and will be the most accurate.
   copies) up to the largest class.
 * After training, a per-class confusion table on the val split is printed.
 
+### Honest accuracy: hold out whole videos
+
+The val score above is the same scene as train, so it says little about a new
+camera. `evaluate_holdout.py` holds out ~30 % of each class's *videos*, trains
+a throw-away model on the rest and scores it on the unseen clips (nothing in
+`AI/runs` is touched):
+
+```powershell
+.venv\Scripts\python.exe AI\training\evaluate_holdout.py tool
+.venv\Scripts\python.exe AI\training\evaluate_holdout.py action
+```
+
+Result with the current dataset (2026-11-19) — tail-split val is 100 %
+for both models, but on unseen videos:
+
+| Class | Videos | Tool model | Action model |
+|---|---|---|---|
+| cutting | 1 | 100 %* | 100 %* |
+| measure | 2 | 0 % (→ screwing) | 0 % (→ screwing) |
+| place_part | 2 | 49 % | 0 % (→ screwing) |
+| screwing | 14 | 93 % | 100 % |
+| **overall** | | **44 %** | **29 %** |
+
+\* only one video, so it can't be held out; this is the optimistic tail split.
+
+With 1–2 clips per class the models learn the *scene* of each clip rather
+than the action, and unfamiliar footage falls back to the class with the most
+variety (screwing). **More varied videos for cutting, measure and place_part
+(5–10 each, different people/angles/lighting) are what will fix this** — not
+more epochs. Re-run this script after adding them to measure progress.
+
 ---
 
 ## Step 1 — Extract hand crops
@@ -102,7 +133,7 @@ Fine-tunes `yolov8n-cls.pt` on the crops extracted above.
 .venv\Scripts\python.exe AI\training\train_classifier.py
 ```
 
-Training runs for up to 50 epochs with early stopping (patience = 12).
+Training runs for up to 60 epochs with early stopping (patience = 15).
 On CPU this takes about 10–20 minutes.
 
 The best weights are saved to:
@@ -133,7 +164,7 @@ are ambiguous from the hand crop alone.
 .venv\Scripts\python.exe AI\training\train_action_classifier.py
 ```
 
-Training runs for up to 50 epochs with early stopping (patience = 12).  Best
+Training runs for up to 60 epochs with early stopping (patience = 15).  Best
 weights saved to:
 ```
 AI/runs/action_classifier/weights/best.pt
