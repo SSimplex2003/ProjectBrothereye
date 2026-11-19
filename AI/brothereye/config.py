@@ -42,6 +42,9 @@ N8N_URL     = os.getenv("N8N_URL", "http://localhost:5678/webhook/work-monitor")
 N8N_ENABLED = os.getenv("N8N_ENABLED", "0") == "1"
 
 JPEG_QUALITY = int(os.getenv("JPEG_QUALITY", "75"))
+# Frames wider than this are downscaled before AI processing, annotation and
+# JPEG encoding (0 = keep the camera's native resolution).
+PROCESS_WIDTH = int(os.getenv("PROCESS_WIDTH", "1280"))
 FPS_CAP      = float(os.getenv("STREAM_FPS", "30"))
 FRAME_SLEEP  = 1.0 / FPS_CAP
 

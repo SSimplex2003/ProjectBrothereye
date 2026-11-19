@@ -10,6 +10,7 @@ import cv2
 import numpy as np
 
 from brothereye import config as cfg
+from brothereye import crops as crop_utils
 from brothereye.database import PgWriter
 from brothereye.detection import (
     ActionFrameClassifier, ScrewingDetector, ToolClassifier, WristMotionTracker,
@@ -96,10 +97,19 @@ class CameraWorker:
         self.event_log          = event_log
 
         self._jpeg      = None
-        self._jpeg_lock = threading.Lock()
+        self._jpeg_seq  = 0
+        self._jpeg_cond = threading.Condition()
         self._stop_evt  = threading.Event()
         self._thread    = threading.Thread(
             target=self._run, daemon=True, name=f"cam-{camera_id}")
+        # The reader thread decodes the stream continuously and keeps only the
+        # newest frame, so slow AI processing never builds up a backlog/delay.
+        self._frame      = None
+        self._frame_seq  = 0
+        self._frame_cond = threading.Condition()
+        self._reader     = threading.Thread(
+            target=self._read_loop, daemon=True, name=f"cam-{camera_id}-reader")
+        self.fps_camera  = 0.0
 
         self._screw_detector = ScrewingDetector()
         self._wrist_trackers: dict = {}
@@ -129,15 +139,29 @@ class CameraWorker:
 
     @property
     def latest_jpeg(self) -> Optional[bytes]:
-        with self._jpeg_lock:
+        with self._jpeg_cond:
             return self._jpeg
 
+    def wait_jpeg(self, last_seq: int, timeout: float = 2.0) -> tuple:
+        """Block until a frame newer than last_seq exists: (seq, jpeg)."""
+        with self._jpeg_cond:
+            self._jpeg_cond.wait_for(
+                lambda: self._jpeg_seq != last_seq or self._stop_evt.is_set(),
+                timeout=timeout)
+            return self._jpeg_seq, self._jpeg
+
     def start(self) -> None:
+        self._reader.start()
         self._thread.start()
 
     def stop(self) -> None:
         self._stop_evt.set()
+        with self._frame_cond:
+            self._frame_cond.notify_all()
+        with self._jpeg_cond:
+            self._jpeg_cond.notify_all()
         self._thread.join(timeout=5)
+        self._reader.join(timeout=5)
 
     def status(self) -> dict:
         return {
@@ -147,6 +171,7 @@ class CameraWorker:
             "connected":  self.connected,
             "error":      self.error,
             "fps":        round(self.fps_actual, 1),
+            "camera_fps": round(self.fps_camera, 1),
             "started_at": self.started_at,
         }
 
@@ -169,30 +194,22 @@ class CameraWorker:
         if isinstance(src, int) or (isinstance(src, str) and src.isdigit()):
             return cv2.VideoCapture(int(src))
         if isinstance(src, str) and src.startswith("rtsp://"):
+            low_latency = "fflags;nobuffer|flags;low_delay|max_delay;0|timeout;5000000"
             os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = (
-                "rtsp_transport;tcp|stimeout;3000000|max_delay;0"
-                if cfg.RTSP_FORCE_TCP
-                else "stimeout;3000000|max_delay;0"
+                "rtsp_transport;tcp|" + low_latency
+                if cfg.RTSP_FORCE_TCP else low_latency
             )
             cap = cv2.VideoCapture(src, cv2.CAP_FFMPEG)
             cap.set(cv2.CAP_PROP_BUFFERSIZE, cfg.RTSP_BUFFER_SIZE)
             return cap
         return cv2.VideoCapture(src)
 
-    def _grab(self, cap: cv2.VideoCapture) -> tuple:
-        if not cfg.DROP_OLD_FRAMES:
-            return cap.read()
-        ok = False
-        for _ in range(3):
-            ok = cap.grab()
-            if not ok:
-                break
-        return cap.retrieve() if ok else cap.read()
-
-    def _run(self) -> None:
+    def _read_loop(self) -> None:
+        """Decode the stream as fast as it arrives; keep only the newest frame."""
         log.info("[%s] Starting (source=%s)", self.camera_id, self.source)
         cap      = None
         backoff  = 2.0
+        last_t   = time.time()
         while not self._stop_evt.is_set():
             if cap is None or not cap.isOpened():
                 try:
@@ -214,8 +231,7 @@ class CameraWorker:
                     backoff = min(backoff * 2, 30.0)
                     continue
 
-            t0        = time.time()
-            ok, frame = self._grab(cap)
+            ok, frame = cap.read()
             if not ok or frame is None:
                 self.connected = False
                 self.error     = "Frame grab failed"
@@ -223,20 +239,55 @@ class CameraWorker:
                 cap = None
                 continue
 
+            now = time.time()
+            self.fps_camera = 0.9 * self.fps_camera + 0.1 / max(1e-6, now - last_t)
+            last_t = now
+            with self._frame_cond:
+                self._frame = frame
+                self._frame_seq += 1
+                self._frame_cond.notify_all()
+
+        if cap:
+            cap.release()
+        log.info("[%s] Reader stopped", self.camera_id)
+
+    def _run(self) -> None:
+        """Run the AI on the newest available frame, skipping any in between."""
+        last_seq = 0
+        last_t   = time.time()
+        while not self._stop_evt.is_set():
+            with self._frame_cond:
+                self._frame_cond.wait_for(
+                    lambda: self._frame_seq != last_seq or self._stop_evt.is_set(),
+                    timeout=1.0)
+                if self._stop_evt.is_set() or self._frame_seq == last_seq:
+                    continue
+                frame, last_seq = self._frame, self._frame_seq
+
+            scale = 1.0
+            if cfg.PROCESS_WIDTH and frame.shape[1] > cfg.PROCESS_WIDTH:
+                scale = cfg.PROCESS_WIDTH / frame.shape[1]
+                frame = cv2.resize(frame, (cfg.PROCESS_WIDTH,
+                                           int(round(frame.shape[0] * scale))),
+                                   interpolation=cv2.INTER_AREA)
+
             try:
-                annotated, events = self._process(frame)
+                annotated, events = self._process(frame, scale)
                 ok2, buf = cv2.imencode(
                     ".jpg", annotated,
                     [cv2.IMWRITE_JPEG_QUALITY, cfg.JPEG_QUALITY])
                 if ok2:
-                    with self._jpeg_lock:
+                    with self._jpeg_cond:
                         self._jpeg = buf.tobytes()
+                        self._jpeg_seq += 1
+                        self._jpeg_cond.notify_all()
             except Exception as exc:
                 log.error("[%s] Processing error: %s", self.camera_id, exc)
                 continue
 
-            elapsed = max(1e-6, time.time() - t0)
-            self.fps_actual = 0.9 * self.fps_actual + 0.1 / elapsed
+            now = time.time()
+            self.fps_actual = 0.9 * self.fps_actual + 0.1 / max(1e-6, now - last_t)
+            last_t = now
 
             if (cfg.N8N_ENABLED and self.n8n_session and events
                     and (time.time() - self._last_n8n_ts) >= cfg.SEND_EVERY_SEC):
@@ -247,14 +298,15 @@ class CameraWorker:
                         pass
                 self._last_n8n_ts = time.time()
 
-        if cap:
-            cap.release()
         log.info("[%s] Stopped", self.camera_id)
 
-    def _process(self, frame: np.ndarray) -> tuple:
+    def _process(self, frame: np.ndarray, scale: float = 1.0) -> tuple:
         h, w            = frame.shape[:2]
         self._frame_count += 1
-        zx, zy, zw, zh = self.zone if self.zone is not None else (0, 0, w, h)
+        if self.zone is not None:
+            zx, zy, zw, zh = (int(round(v * scale)) for v in self.zone)
+        else:
+            zx, zy, zw, zh = 0, 0, w, h
         now             = time.time()
         now_iso         = datetime.now(timezone.utc).isoformat()
 
@@ -262,6 +314,9 @@ class CameraWorker:
             frame, persist=True, verbose=False,
             conf=cfg.POSE_CONF, iou=cfg.POSE_IOU, device=cfg.DEVICE)
         people = extract_people(pose_results[0])
+        # Classifier crops must come from the clean frame: the frame below gets
+        # privacy-blurred and annotated, which the models were never trained on.
+        raw = frame.copy()
 
         if self._frame_count % cfg.SEG_INFER_EVERY == 0:
             seg_results = self.seg_model.predict(
@@ -311,8 +366,13 @@ class CameraWorker:
 
             cx, cy  = (x1+x2)/2.0, (y1+y2)/2.0
             in_zone = (zx < cx < zx+zw) and (zy < cy < zy+zh)
+            # Motion heuristics use pixel thresholds tuned at camera resolution,
+            # so feed them native-resolution coordinates, not downscaled ones.
+            inv     = 1.0 / scale
+            kpts_n  = ([(p[0]*inv, p[1]*inv) if p is not None else None
+                        for p in kpts] if kpts else kpts)
             speed   = movement_speed(
-                (self.camera_id, tid), cx, cy, now, self._last_centers)
+                (self.camera_id, tid), cx*inv, cy*inv, now, self._last_centers)
 
             ix1 = clamp(int(x1), 0, w-1);  iy1 = clamp(int(y1), 0, h-1)
             ix2 = clamp(int(x2), 0, w-1);  iy2 = clamp(int(y2), 0, h-1)
@@ -320,10 +380,10 @@ class CameraWorker:
             hand_crop   = None
             person_crop = None
             if ix2 > ix1 and iy2 > iy1:
-                ph       = iy2 - iy1
-                hand_y1  = max(iy1, iy2 - int(ph * 0.35))
-                hand_crop = frame[hand_y1:iy2, ix1:ix2].copy()
-                person_crop = frame[iy1:iy2, ix1:ix2].copy()
+                pbox        = (ix1, iy1, ix2, iy2)
+                hand_crop   = crop_utils.hand_crop(
+                    raw, crop_utils.wrists_from_kpts(kpts), pbox)
+                person_crop = crop_utils.person_crop(raw, pbox)
 
             tool_label, tool_conf = None, 0.0
             if (self.tool_classifier is not None
@@ -336,7 +396,7 @@ class CameraWorker:
                     pass
 
             tracker      = self._wrist_trackers.setdefault(tid, WristMotionTracker())
-            motion_feats = tracker.update(kpts)
+            motion_feats = tracker.update(kpts_n)
             motion_label, motion_conf = self._screw_detector.classify(
                 motion_feats, hand_crop=hand_crop)
 
@@ -358,8 +418,8 @@ class CameraWorker:
 
             if action in ("unknown",):
                 action = fallback_label(
-                    head_direction(kpts), hands_height(kpts),
-                    posture(kpts), speed, in_zone)
+                    head_direction(kpts_n), hands_height(kpts_n),
+                    posture(kpts_n), speed, in_zone)
                 conf = 0.55
 
             dur_tracker = self._dur_trackers.setdefault(
@@ -378,8 +438,8 @@ class CameraWorker:
                 if self.event_log is not None:
                     self.event_log.append(tagged)
 
-            if action == "screwing" and kpts:
-                wrist = (_kpt(kpts, 9) or _kpt(kpts, 10))
+            if action == "screwing" and kpts_n:
+                wrist = (_kpt(kpts_n, 9) or _kpt(kpts_n, 10))
                 if wrist:
                     osc = self._osc_counters.setdefault(
                         tid, OscillationCycleCounter())

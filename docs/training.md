@@ -43,6 +43,27 @@ actions_dataset/
 especially for classes you want to detect reliably.  The `screwing` class
 currently has the most data and will be the most accurate.
 
+> Raw videos are **not** committed (see `.gitignore`, GitHub's 100 MB file
+> limit). The extracted crops in `actions_dataset/tool_crops/` and
+> `actions_dataset/action_crops/` are committed, so you can retrain without
+> the videos by skipping the collect steps. 10-bit ProRes clips can't be read
+> by OpenCV — convert them first, e.g.
+> `ffmpeg -i in.mov -c:v libx264 -crf 18 -pix_fmt yuv420p -an out.mp4`.
+
+### How the dataset is built
+
+* **Same crops as live inference.** Both the collect scripts and the camera
+  loop crop through `AI/brothereye/crops.py`, so the models see identical
+  input in training and production.
+* **Temporal train/val split.** The last 20 % of every clip is the val set,
+  with a 1 s gap before it. Random frame splits leak near-identical
+  neighbouring frames into val and report a meaningless ~100 % accuracy.
+  Val is still the same scene as train, so the live camera is the real test.
+* **Balanced classes.** Each class gets its own frame stride (aiming for
+  ~700 frames per class), and the train split is oversampled (`*_dup*.jpg`
+  copies) up to the largest class.
+* After training, a per-class confusion table on the val split is printed.
+
 ---
 
 ## Step 1 — Extract hand crops

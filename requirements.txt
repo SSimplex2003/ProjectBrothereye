@@ -12,6 +12,7 @@ flask-cors>=4.0.0
 # Computer vision + AI
 opencv-python>=4.9.0
 ultralytics>=8.2.0
+lap>=0.5.12          # used by ultralytics tracking (pose_model.track)
 numpy>=1.26.0
 
 # HTTP client (n8n webhook forwarding)

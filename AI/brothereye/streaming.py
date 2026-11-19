@@ -121,16 +121,19 @@ class StreamingServer:
         app.run(host=host, port=port, threaded=True, use_reloader=False)
 
     def _mjpeg_gen(self, camera_id: str):
+        # Push each processed frame once, as soon as it exists. Re-sending the
+        # same JPEG on a timer wastes bandwidth and makes browsers lag behind.
         boundary = b"--frame\r\nContent-Type: image/jpeg\r\n\r\n"
+        last_seq = -1
         while True:
             try:
                 worker = self.get_camera(camera_id)
             except KeyError:
                 break
-            jpeg = worker.latest_jpeg
-            if jpeg:
+            seq, jpeg = worker.wait_jpeg(last_seq, timeout=2.0)
+            if jpeg and seq != last_seq:
+                last_seq = seq
                 yield boundary + jpeg + b"\r\n"
-            time.sleep(cfg.FRAME_SLEEP)
 
     @staticmethod
     def _source_type(src) -> str:
